@@ -7,6 +7,7 @@
 <!-- Libraries (pinned versions). Everything runs in the visitor's browser; no file is uploaded anywhere. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <style>
   :root {
     --bg:#1e1e24; --surface:#27272f; --surface-hi:#30303a; --text:#f2f0eb; --muted:#8d8d9b;
@@ -67,23 +68,23 @@
 <main>
   <div class="eyebrow">PDF &rarr; WORD</div>
   <h1>Convert with care.</h1>
-  <p class="lead">Text, headings and paragraphs carry over to a Word file. Your PDF never leaves your computer.</p>
+  <p class="lead">Text, headings and paragraphs carry over to a Word file. Scanned PDFs and photos of documents are read with OCR. Your files never leave your computer.</p>
 
   <div class="card" id="card">
     <small>SELECTED FILE</small>
     <div class="name" id="name">Nothing chosen yet</div>
-    <div class="size" id="size">Choose a PDF, or drag one onto this card.</div>
+    <div class="size" id="size">Choose a PDF or scanned images, or drag them onto this card.</div>
   </div>
 
   <div class="row">
-    <button class="btn-small" id="choose">Choose PDF</button>
+    <button class="btn-small" id="choose">Choose File</button>
     <button class="btn-big" id="convert" disabled>Convert to Word</button>
   </div>
-  <input type="file" id="file" accept="application/pdf,.pdf" hidden>
+  <input type="file" id="file" accept="application/pdf,.pdf,image/*" multiple hidden>
 
   <div class="status state-idle" id="status">
     <div class="head"><div class="dot"></div><span id="headline">Idle</span></div>
-    <div class="detail" id="detail">Choose a PDF to begin.</div>
+    <div class="detail" id="detail">Choose a PDF or images to begin.</div>
     <div class="track"><div class="bar"></div></div>
   </div>
 
@@ -96,7 +97,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 
 const $ = (id) => document.getElementById(id);
 const card = $("card"), fileInput = $("file"), btnConvert = $("convert"), btnChoose = $("choose");
-let currentFile = null, busy = false;
+let currentFiles = [], busy = false;
 
 /* ---------- Status feedback: Idle / Converting / Finished / Failed ---------- */
 const HEADLINES = { idle:"Idle", processing:"Converting\u2026",
@@ -107,24 +108,30 @@ function setState(state, detail) {
   $("detail").textContent = detail || "";
 }
 
-/* ---------- File selection (button, or drag and drop) ---------- */
-function pickFile(file) {
-  if (!file) return;
-  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
-    alert("Please choose a file that ends in .pdf.");
-    return;
-  }
-  currentFile = file;
-  $("name").textContent = file.name;
-  $("size").textContent = (file.size / 1024 / 1024).toFixed(2) + " MB";
+/* ---------- File selection (button, or drag and drop) ----------
+   Accepts ONE pdf, or ONE OR MORE images (they become pages, in filename order). */
+const isPdf = f => /\.pdf$/i.test(f.name) || f.type === "application/pdf";
+const isImg = f => f.type.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name);
+
+function pickFiles(list) {
+  const files = Array.from(list || []);
+  if (!files.length) return;
+  if (files.length === 1 && isPdf(files[0])) currentFiles = files;
+  else if (files.every(isImg))
+    currentFiles = files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  else { alert("Please choose one PDF, or one or more images (JPG, PNG, WEBP)."); return; }
+  const total = currentFiles.reduce((s, f) => s + f.size, 0);
+  $("name").textContent = currentFiles.length === 1 ? currentFiles[0].name : currentFiles.length + " images";
+  $("size").textContent = (total / 1024 / 1024).toFixed(2) + " MB" +
+    (currentFiles.length > 1 ? " \u00b7 pages follow filename order" : "");
   btnConvert.disabled = false;
   setState("idle", "Ready. Press \u201cConvert to Word\u201d when you are.");
 }
 btnChoose.onclick = () => !busy && fileInput.click();
-fileInput.onchange = () => { pickFile(fileInput.files[0]); fileInput.value = ""; };
+fileInput.onchange = () => { pickFiles(fileInput.files); fileInput.value = ""; };
 ["dragenter","dragover"].forEach(e => card.addEventListener(e, ev => { ev.preventDefault(); card.classList.add("drag"); }));
 ["dragleave","drop"].forEach(e => card.addEventListener(e, ev => { ev.preventDefault(); card.classList.remove("drag"); }));
-card.addEventListener("drop", ev => !busy && pickFile(ev.dataTransfer.files[0]));
+card.addEventListener("drop", ev => !busy && pickFiles(ev.dataTransfer.files));
 
 /* ---------- Conversion pipeline ----------
    1. pdf.js opens the file (errors for encrypted / corrupted files are caught here).
@@ -204,33 +211,97 @@ function buildParagraphs(pages) {
   return out;
 }
 
+/* ---------- OCR (for scanned PDFs and images) ----------
+   Tesseract.js reads text out of pictures. The engine and English language data
+   download once from a CDN; your files themselves are never uploaded. */
+let ocrWorker = null, ocrLabel = "";
+async function getOcr() {
+  if (!ocrWorker) {
+    setState("processing", "Loading the text-recognition engine (first time only)\u2026");
+    ocrWorker = await Tesseract.createWorker("eng", 1, {
+      logger: m => {
+        if (m.status === "recognizing text" && busy)
+          $("detail").textContent = `${ocrLabel} \u2014 ${Math.round(m.progress * 100)}%`;
+      }
+    });
+  }
+  return ocrWorker;
+}
+async function ocrText(input, label) {
+  const w = await getOcr();
+  ocrLabel = label;
+  setState("processing", label);
+  const { data } = await w.recognize(input);
+  return data.text || "";
+}
+async function renderPage(pdf, p) {              // PDF page -> white-background canvas at 2x for sharper OCR
+  const page = await pdf.getPage(p);
+  const vp = page.getViewport({ scale: 2 });
+  const c = document.createElement("canvas");
+  c.width = vp.width; c.height = vp.height;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  return c;
+}
+function textToParagraphs(text, newPage) {      // blank lines = paragraph breaks
+  const parts = text.split(/\n\s*\n/).map(t => t.replace(/\s*\n\s*/g, " ").trim()).filter(Boolean);
+  if (!parts.length) return [new docx.Paragraph({ pageBreakBefore: newPage, children: [] })];
+  return parts.map((t, i) => new docx.Paragraph({
+    pageBreakBefore: newPage && i === 0, spacing: { after: 120 }, children: [new docx.TextRun(t)] }));
+}
+
 async function convert() {
-  if (busy || !currentFile) return;
+  if (busy || !currentFiles.length) return;
   busy = true;
   btnConvert.disabled = true; btnChoose.disabled = true; btnConvert.textContent = "Working\u2026";
-  setState("processing", "Opening your PDF\u2026");
+  setState("processing", "Opening your file\u2026");
   try {
-    const data = new Uint8Array(await currentFile.arrayBuffer());
-    let pdf;
-    try {
-      pdf = await pdfjsLib.getDocument({ data }).promise;
-    } catch (e) {
-      if (e && e.name === "PasswordException")
-        throw new Error("This PDF is password-protected (encrypted).\n\nRemove the password first, then try again.");
-      throw new Error("This PDF appears to be corrupted or is not a valid PDF, so it can't be opened.");
-    }
-    if (pdf.numPages === 0) throw new Error("This PDF has no pages, so there is nothing to convert.");
+    const first = currentFiles[0];
+    const outName = (currentFiles.length > 1 ? "scanned-images" : first.name.replace(/\.[^.]+$/, "")) + ".docx";
+    let children = [];
 
-    const pages = await extractLines(pdf);
-    if (!pages.flat().length)
-      throw new Error("No selectable text was found. This is probably a scanned PDF (images of pages).\n\nRun it through an OCR tool first.");
+    if (isPdf(first)) {
+      const data = new Uint8Array(await first.arrayBuffer());
+      let pdf;
+      try {
+        pdf = await pdfjsLib.getDocument({ data }).promise;
+      } catch (e) {
+        if (e && e.name === "PasswordException")
+          throw new Error("This PDF is password-protected (encrypted).\n\nRemove the password first, then try again.");
+        throw new Error("This PDF appears to be corrupted or is not a valid PDF, so it can't be opened.");
+      }
+      if (pdf.numPages === 0) throw new Error("This PDF has no pages, so there is nothing to convert.");
+
+      const pages = await extractLines(pdf);
+      if (pages.flat().length) {
+        children = buildParagraphs(pages);                 // normal PDF with real text
+      } else {                                             // scanned PDF -> OCR every page
+        if (pdf.numPages > 30 && !confirm(
+          `This is a scanned PDF with ${pdf.numPages} pages. Reading scans takes several seconds per page, ` +
+          `so this could take a long time. Continue?`)) {
+          setState("idle", "Cancelled. Nothing was changed.");
+          return;
+        }
+        for (let p = 1; p <= pdf.numPages; p++) {
+          const canvas = await renderPage(pdf, p);
+          const text = await ocrText(canvas, `Recognising page ${p} of ${pdf.numPages}`);
+          children.push(...textToParagraphs(text, p > 1));
+        }
+      }
+    } else {                                               // one or more images
+      for (let i = 0; i < currentFiles.length; i++) {
+        let text;
+        try { text = await ocrText(currentFiles[i], `Recognising image ${i + 1} of ${currentFiles.length}`); }
+        catch (e) { throw new Error(`Couldn't read "${currentFiles[i].name}". It may be damaged or not a real image.`); }
+        children.push(...textToParagraphs(text, i > 0));
+      }
+    }
 
     setState("processing", "Building your Word file\u2026");
     await tick();
-    const doc = new docx.Document({ sections:[{ children: buildParagraphs(pages) }] });
+    const doc = new docx.Document({ sections: [{ children }] });
     const blob = await docx.Packer.toBlob(doc);
-
-    const outName = currentFile.name.replace(/\.pdf$/i, "") + ".docx";
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = outName;
     document.body.appendChild(a); a.click(); a.remove();
@@ -240,10 +311,12 @@ async function convert() {
     setState("error", err.message.split("\n")[0]);
     alert(err.message || "Something unexpected went wrong.");
   } finally {
+    if (ocrWorker) { try { await ocrWorker.terminate(); } catch (e) {} ocrWorker = null; }
     busy = false; btnConvert.disabled = false; btnChoose.disabled = false;
     btnConvert.textContent = "Convert to Word";
   }
 }
+
 btnConvert.onclick = convert;
 </script>
 </body>
