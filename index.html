@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF to Word</title>
+<!-- Libraries (pinned versions). Everything runs in the visitor's browser; no file is uploaded anywhere. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.js"></script>
+<style>
+  :root {
+    --bg:#1e1e24; --surface:#27272f; --surface-hi:#30303a; --text:#f2f0eb; --muted:#8d8d9b;
+    --faint:#4a4a58; --accent:#7c9cff; --accent-hi:#97b0ff; --accent-shadow:#4b63b8;
+    --idle:#8d8d9b; --processing:#f2b84b; --success:#5fd38d; --error:#ef6b6b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); min-height:100vh;
+         font-family:"Segoe UI","SF Pro Text","Helvetica Neue",Arial,sans-serif; }
+  /* Asymmetric margins: left padding is larger than right on purpose. */
+  main { max-width:680px; margin:0 auto; padding:56px 32px 40px 56px; }
+  .eyebrow { color:var(--accent); font-size:12px; font-weight:700; letter-spacing:.18em; }
+  h1 { font-size:38px; margin:8px 0 0; line-height:1.1; }
+  .lead { color:var(--muted); line-height:1.6; margin:12px 0 0; }
+  .card { background:var(--surface); border-left:4px solid var(--faint); margin-top:32px;
+          padding:22px 22px 24px 24px; transition:border-color .3s; }
+  .card small { color:var(--muted); font-size:11px; letter-spacing:.1em; }
+  .name { font-size:18px; font-weight:700; margin-top:6px; word-break:break-all; }
+  .size { color:var(--muted); font-size:13px; margin-top:4px; }
+  .card.drag { border-left-color:var(--accent); background:var(--surface-hi); }
+  .row { display:flex; align-items:flex-end; gap:18px; margin-top:32px; flex-wrap:wrap; }
+  /* Tactile buttons: a darker bottom lip (box-shadow) that shrinks when pressed. */
+  button { font:inherit; font-weight:700; border:0; cursor:pointer; color:var(--text);
+           transition:background .15s, transform .05s, box-shadow .05s; }
+  .btn-small { background:var(--surface); padding:12px 22px; font-size:14px;
+               box-shadow:0 4px 0 #15151a; }
+  .btn-small:hover { background:var(--surface-hi); }
+  .btn-big { background:var(--accent); color:#14141a; padding:17px 40px; font-size:17px;
+             box-shadow:0 4px 0 var(--accent-shadow); }
+  .btn-big:hover:not(:disabled) { background:var(--accent-hi); }
+  button:active:not(:disabled) { transform:translateY(2px); }
+  .btn-small:active:not(:disabled) { box-shadow:0 2px 0 #15151a; }
+  .btn-big:active:not(:disabled) { box-shadow:0 2px 0 var(--accent-shadow); }
+  button:disabled { background:#2c2c35; color:var(--faint); box-shadow:none; cursor:not-allowed; }
+  /* Status block is indented more than everything else, like a margin note. */
+  .status { margin:40px 0 0 32px; }
+  .head { display:flex; align-items:center; gap:12px; font-size:18px; font-weight:700; }
+  .dot { width:12px; height:12px; border-radius:50%; background:var(--idle); }
+  .detail { color:var(--muted); margin:8px 0 0 24px; line-height:1.5; white-space:pre-line; }
+  .track { height:4px; background:var(--faint); margin-top:18px; overflow:hidden; position:relative; }
+  .bar { position:absolute; top:0; left:0; height:100%; width:0; background:var(--success); }
+  .state-processing .dot { background:var(--processing); animation:pulse 1s infinite; }
+  .state-processing .head span { color:var(--processing); }
+  .state-processing .bar { width:120px; background:var(--accent); animation:slide 1.2s linear infinite; }
+  .state-success .dot, .state-success .head span { background:none; color:var(--success); }
+  .state-success .dot { background:var(--success); }
+  .state-success .bar { width:100%; }
+  .state-error .dot { background:var(--error); }
+  .state-error .head span { color:var(--error); }
+  .state-error .bar { width:100%; background:var(--error); }
+  @keyframes slide { from { left:-120px; } to { left:100%; } }
+  @keyframes pulse { 50% { opacity:.35; } }
+  footer { color:var(--faint); font-size:12px; text-align:right; margin-top:48px; }
+  @media (max-width:520px){ main{padding:36px 20px 28px 28px;} h1{font-size:30px;} .status{margin-left:12px;} }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">PDF &rarr; WORD</div>
+  <h1>Convert with care.</h1>
+  <p class="lead">Text, headings and paragraphs carry over to a Word file. Your PDF never leaves your computer.</p>
+
+  <div class="card" id="card">
+    <small>SELECTED FILE</small>
+    <div class="name" id="name">Nothing chosen yet</div>
+    <div class="size" id="size">Choose a PDF, or drag one onto this card.</div>
+  </div>
+
+  <div class="row">
+    <button class="btn-small" id="choose">Choose PDF</button>
+    <button class="btn-big" id="convert" disabled>Convert to Word</button>
+  </div>
+  <input type="file" id="file" accept="application/pdf,.pdf" hidden>
+
+  <div class="status state-idle" id="status">
+    <div class="head"><div class="dot"></div><span id="headline">Idle</span></div>
+    <div class="detail" id="detail">Choose a PDF to begin.</div>
+    <div class="track"><div class="bar"></div></div>
+  </div>
+
+  <footer>Encrypted or damaged files are detected and reported safely.</footer>
+</main>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const $ = (id) => document.getElementById(id);
+const card = $("card"), fileInput = $("file"), btnConvert = $("convert"), btnChoose = $("choose");
+let currentFile = null, busy = false;
+
+/* ---------- Status feedback: Idle / Converting / Finished / Failed ---------- */
+const HEADLINES = { idle:"Idle", processing:"Converting\u2026",
+                    success:"\u2713 Finished Successfully", error:"Conversion Failed" };
+function setState(state, detail) {
+  $("status").className = "status state-" + state;
+  $("headline").textContent = HEADLINES[state];
+  $("detail").textContent = detail || "";
+}
+
+/* ---------- File selection (button, or drag and drop) ---------- */
+function pickFile(file) {
+  if (!file) return;
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+    alert("Please choose a file that ends in .pdf.");
+    return;
+  }
+  currentFile = file;
+  $("name").textContent = file.name;
+  $("size").textContent = (file.size / 1024 / 1024).toFixed(2) + " MB";
+  btnConvert.disabled = false;
+  setState("idle", "Ready. Press \u201cConvert to Word\u201d when you are.");
+}
+btnChoose.onclick = () => !busy && fileInput.click();
+fileInput.onchange = () => { pickFile(fileInput.files[0]); fileInput.value = ""; };
+["dragenter","dragover"].forEach(e => card.addEventListener(e, ev => { ev.preventDefault(); card.classList.add("drag"); }));
+["dragleave","drop"].forEach(e => card.addEventListener(e, ev => { ev.preventDefault(); card.classList.remove("drag"); }));
+card.addEventListener("drop", ev => !busy && pickFile(ev.dataTransfer.files[0]));
+
+/* ---------- Conversion pipeline ----------
+   1. pdf.js opens the file (errors for encrypted / corrupted files are caught here).
+   2. For each page, text pieces are grouped into lines by their y position,
+      and sorted left to right by x position.
+   3. Lines become paragraphs (a big vertical gap or a short line = new paragraph).
+      Larger-than-normal text becomes a Heading.
+   4. docx.js builds the Word file and the browser downloads it.            */
+const tick = () => new Promise(r => setTimeout(r, 0)); // lets the UI repaint between pages
+
+async function extractLines(pdf) {
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    setState("processing", `Reading page ${p} of ${pdf.numPages}\u2026`);
+    await tick();
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const items = content.items
+      .filter(i => i.str && i.str.trim() !== "")
+      .map(i => ({ s:i.str, x:i.transform[4], y:i.transform[5], w:i.width,
+                   size:Math.hypot(i.transform[0], i.transform[1]) || i.height }));
+    items.sort((a, b) => b.y - a.y || a.x - b.x);
+
+    const lines = [];
+    for (const it of items) {                       // group pieces sharing (almost) the same y
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(last.y - it.y) < Math.max(2, it.size * 0.4)) last.items.push(it);
+      else lines.push({ y:it.y, items:[it] });
+    }
+    pages.push(lines.map(l => {
+      l.items.sort((a, b) => a.x - b.x);
+      let text = "", prevEnd = null;
+      for (const it of l.items) {                   // add a space where there is a visible gap
+        if (prevEnd !== null && it.x - prevEnd > it.size * 0.15 && !text.endsWith(" ")) text += " ";
+        text += it.s; prevEnd = it.x + it.w;
+      }
+      const size = Math.max(...l.items.map(i => i.size));
+      return { y:l.y, size, text:text.trim(), x0:l.items[0].x, x1:prevEnd };
+    }));
+  }
+  return pages;
+}
+
+function buildParagraphs(pages) {
+  // Body font size = the most common size in the document.
+  const counts = {};
+  pages.flat().forEach(l => { const k = Math.round(l.size); counts[k] = (counts[k] || 0) + l.text.length; });
+  const body = +Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 12;
+
+  const out = [];
+  pages.forEach((lines, pi) => {
+    const maxW = Math.max(1, ...lines.map(l => l.x1 - l.x0));
+    let buf = null, prev = null, first = pi > 0;
+    const flush = () => {
+      if (!buf) return;
+      const opts = { pageBreakBefore: first };
+      first = false;
+      if (buf.size >= body * 1.35 && buf.text.length < 120)
+        out.push(new docx.Paragraph({ ...opts, text:buf.text, heading:docx.HeadingLevel.HEADING_1 }));
+      else if (buf.size >= body * 1.15 && buf.text.length < 120)
+        out.push(new docx.Paragraph({ ...opts, text:buf.text, heading:docx.HeadingLevel.HEADING_2 }));
+      else
+        out.push(new docx.Paragraph({ ...opts, spacing:{ after:120 }, children:[new docx.TextRun(buf.text)] }));
+      buf = null;
+    };
+    for (const l of lines) {
+      const gap = prev ? prev.y - l.y : 0;
+      const prevShort = prev && (prev.x1 - prev.x0) < maxW * 0.7;
+      const sameSize = prev && Math.abs(prev.size - l.size) < 1;
+      if (buf && gap <= l.size * 1.6 && !prevShort && sameSize) buf.text += " " + l.text;
+      else { flush(); buf = { text:l.text, size:l.size }; }
+      prev = l;
+    }
+    flush();
+    if (first) out.push(new docx.Paragraph({ pageBreakBefore:true, children:[] })); // blank page
+  });
+  return out;
+}
+
+async function convert() {
+  if (busy || !currentFile) return;
+  busy = true;
+  btnConvert.disabled = true; btnChoose.disabled = true; btnConvert.textContent = "Working\u2026";
+  setState("processing", "Opening your PDF\u2026");
+  try {
+    const data = new Uint8Array(await currentFile.arrayBuffer());
+    let pdf;
+    try {
+      pdf = await pdfjsLib.getDocument({ data }).promise;
+    } catch (e) {
+      if (e && e.name === "PasswordException")
+        throw new Error("This PDF is password-protected (encrypted).\n\nRemove the password first, then try again.");
+      throw new Error("This PDF appears to be corrupted or is not a valid PDF, so it can't be opened.");
+    }
+    if (pdf.numPages === 0) throw new Error("This PDF has no pages, so there is nothing to convert.");
+
+    const pages = await extractLines(pdf);
+    if (!pages.flat().length)
+      throw new Error("No selectable text was found. This is probably a scanned PDF (images of pages).\n\nRun it through an OCR tool first.");
+
+    setState("processing", "Building your Word file\u2026");
+    await tick();
+    const doc = new docx.Document({ sections:[{ children: buildParagraphs(pages) }] });
+    const blob = await docx.Packer.toBlob(doc);
+
+    const outName = currentFile.name.replace(/\.pdf$/i, "") + ".docx";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = outName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setState("success", `Saved as ${outName}\nCheck your Downloads folder.`);
+  } catch (err) {
+    setState("error", err.message.split("\n")[0]);
+    alert(err.message || "Something unexpected went wrong.");
+  } finally {
+    busy = false; btnConvert.disabled = false; btnChoose.disabled = false;
+    btnConvert.textContent = "Convert to Word";
+  }
+}
+btnConvert.onclick = convert;
+</script>
+</body>
+</html>
